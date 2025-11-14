@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ShiftCrafter Part 3 — 月次 三交代（CSV/ICS/検証CSV対応）MVP</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; color: #0e1d2f; }
+    h1 { margin: 0 0 12px; font-size: 22px; }
+    .desc { color: #456; margin-bottom: 16px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .panel { border: 1px solid #dde3ea; border-radius: 10px; padding: 12px; background: #f8fafc; }
+    .panel h2 { font-size: 16px; margin: 0 0 8px; }
+    label { display:block; font-size: 12px; color:#345; margin: 6px 0 4px; }
+    input, textarea, select, button { width: 100%; box-sizing: border-box; font-size: 14px; padding: 8px; border: 1px solid #c9d3df; border-radius: 8px; }
+    textarea { min-height: 120px; resize: vertical; }
+    .row { display:flex; gap: 8px; align-items:center; }
+    .row > * { flex: 1; }
+    .btn { background:#0ea5a6; color:white; border:none; padding:10px 12px; border-radius: 10px; cursor:pointer; font-weight: 600; }
+    .btn.secondary { background:#475569; }
+    .btn:disabled { opacity:.6; cursor:not-allowed; }
+    table { width:100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border:1px solid #e2e8f0; padding:6px 8px; text-align:left; }
+    th { background:#eef2f7; }
+    .note { font-size:12px; color:#566; }
+    .ok { color:#0a7; font-weight:600; }
+    .warn { color:#b45309; font-weight:600; }
+    .error { color:#b91c1c; font-weight:600; }
+    .footer { margin-top: 16px; font-size: 12px; color:#566; }
+    .mono { font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+  </style>
+</head>
+<body>
+  <h1>ShiftCrafter Part 3 — 月次 三交代（CSV/ICS/検証CSV対応）MVP</h1>
+  <p class="desc">二交代から拡張し、<b>日勤 / 準夜 / 深夜</b>の<b>1か月</b>シフトをブラウザだけで自動作成。<b>CSV</b>／<b>ICS</b>／<b>検証CSV</b>を出力。データは外部送信しません。</p>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>入力</h2>
+      <label>対象月（YYYY-MM）</label>
+      <input id="month" type="month" />
+      <div class="row">
+        <div>
+          <label>日勤の必要人数（全日共通・MVP）</label>
+          <input id="needDay" type="number" min="0" value="2" />
+        </div>
+        <div>
+          <label>準夜の必要人数（全日共通・MVP）</label>
+          <input id="needEve" type="number" min="0" value="1" />
+        </div>
+        <div>
+          <label>深夜の必要人数（全日共通・MVP）</label>
+          <input id="needNight" type="number" min="0" value="1" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>週あたり <b>深夜</b> 上限（各職員）</label>
+          <input id="weeklyNightCap" type="number" min="0" value="2" />
+        </div>
+        <div>
+          <label>月あたり <b>深夜</b> 上限（任意・空なら無制限）</label>
+          <input id="monthlyNightCap" type="number" min="0" placeholder="例: 6" />
+        </div>
+      </div>
+      <label>職員リスト（1行1名）</label>
+      <textarea id="staffList" placeholder="田中\n鈴木\n佐藤\n…"></textarea>
+      <label>休み希望（任意・1行1件）<span class="note">（例）2025-11-03 田中</span></label>
+      <textarea id="requests" placeholder="2025-11-03 田中\n2025-11-08 鈴木"></textarea>
+      <div class="row" style="margin-top:8px;">
+        <button class="btn" id="btnGen">シフト自動作成</button>
+        <button class="btn secondary" id="btnCsv" disabled>CSVダウンロード</button>
+        <button class="btn secondary" id="btnIcsAll" disabled>ICSダウンロード（全体）</button>
+        <button class="btn secondary" id="btnValidate" disabled>検証CSVダウンロード</button>
+      </div>
+      <div id="msg" class="note" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="panel">
+      <h2>結果プレビュー（読み取り専用）</h2>
+      <div id="tableWrap" class="mono">未作成</div>
+      <div class="footer note">
+        制約（MVP）：<b>準夜→翌日の日勤 禁止</b>、<b>同日複数シフト 禁止</b>、<b>深夜の週/月上限</b>、希望休尊重。公平性最適化は次版で対応。
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <h2>検証サマリ（MVP）</h2>
+    <div id="summary" class="mono">—</div>
+  </div>
+
+<script>
+/* ========= ユーティリティ ========= */
+const fmtDate = (d) => d.toISOString().slice(0,10);
+function parseMonthStr(ym){ if(!ym) return null; const [y,m]=ym.split('-').map(Number); return new Date(y,m-1,1); }
+function daysInMonth(d){ return new Date(d.getFullYear(), d.getMonth()+1, 0).getDate(); }
+function addDays(date, n){ const d = new Date(date); d.setDate(d.getDate()+n); return d; }
+function dowStr(d){ return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()]; }
+function isoWeekKey(d){
+  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = (date.getUTCDay()+6)%7; date.setUTCDate(date.getUTCDate()-dayNum+3);
+  const firstThu = new Date(Date.UTC(date.getUTCFullYear(),0,4));
+  const week = 1 + Math.round(((date - firstThu)/86400000 - 3 + ((firstThu.getUTCDay()+6)%7))/7);
+  return `${date.getUTCFullYear()}-W${String(week).padStart(2,'0')}`;
+}
+
+/* ========= 入力の取り出し ========= */
+function getStaff(){
+  return document.getElementById('staffList').value.split(/\n+/).map(s=>s.trim()).filter(Boolean);
+}
+function getRequests(){
+  const m = {};
+  document.getElementById('requests').value.split(/\n+/).forEach(line=>{
+    line = line.trim(); if(!line) return;
+    const [date, ...rest] = line.split(/\s+/);
+    const name = rest.join(' ').trim();
+    if(!m[date]) m[date] = new Set();
+    if(name) m[date].add(name);
+  });
+  return m;
+}
+
+/* ========= 割当アルゴリズム（三交代MVP） =========
+  順序：深夜 → 準夜 → 日勤
+  ルール：
+   - 同日で複数シフト不可
+   - 準夜(前日) → 翌日の日勤 禁止
+   - 深夜は週/月の上限管理
+   - 候補ランキング：深夜=夜勤回数少→総割当少→名前、準夜=準夜回数少→総割当少→名前、日勤=総割当少→夜勤少→準夜少→名前
+*/
+function assignMonthly3(params){
+  const { monthStart, needDay, needEve, needNight, weeklyNightCap, monthlyNightCap, staff, requests } = params;
+  const days = daysInMonth(monthStart);
+  const schedule = []; // [{date,dow, day:[], eve:[], night:[], needDay, needEve, needNight}]
+  const stats = {}; // per staff
+  staff.forEach(s=> stats[s] = { total:0, eveMonth:0, nightMonth:0, nightByWeek:{}, lastShiftByDate:{} });
+
+  for(let i=0;i<days;i++){
+    const d = addDays(monthStart, i);
+    const dateStr = fmtDate(d);
+    const weekKey = isoWeekKey(d);
+    const reqDay = Number(needDay)||0;
+    const reqEve = Number(needEve)||0;
+    const reqNight = Number(needNight)||0;
+
+    const dayAssigned=[], eveAssigned=[], nightAssigned=[];
+    const isReqOff = (name)=> requests[dateStr]?.has(name);
+    const hadEvePrev = (name)=> stats[name].lastShiftByDate[ fmtDate(addDays(d,-1)) ] === 'Eve';
+
+    function rankNight(n){ const st=stats[n]; return [st.nightMonth, (st.nightByWeek[weekKey]||0), st.total, n]; }
+    function rankEve(n){ const st=stats[n]; return [st.eveMonth, st.total, n]; }
+    function rankDay(n){ const st=stats[n]; return [st.total, st.nightMonth, st.eveMonth, n]; }
+
+    // 深夜（00:30-09:00 想定）
+    for(let k=0;k<reqNight;k++){
+      const cands = staff.filter(n=>{
+        if(isReqOff(n)) return false;
+        // 同日重複回避
+        if(dayAssigned.includes(n) || eveAssigned.includes(n) || nightAssigned.includes(n)) return false;
+        const wk = stats[n].nightByWeek[weekKey]||0;
+        if(weeklyNightCap!=='' && weeklyNightCap!=null && wk >= Number(weeklyNightCap)) return false;
+        if(monthlyNightCap!=='' && monthlyNightCap!=null && stats[n].nightMonth >= Number(monthlyNightCap)) return false;
+        return true;
+      }).sort((a,b)=> (rankNight(a)<rankNight(b)?-1:1));
+      if(cands.length){
+        const p = cands[0];
+        nightAssigned.push(p);
+        stats[p].total++; stats[p].nightMonth++;
+        stats[p].nightByWeek[weekKey]=(stats[p].nightByWeek[weekKey]||0)+1;
+        stats[p].lastShiftByDate[dateStr]='Night';
+      }
+    }
+
+    // 準夜（16:30-00:30 翌日）
+    for(let k=0;k<reqEve;k++){
+      const cands = staff.filter(n=>{
+        if(isReqOff(n)) return false;
+        if(dayAssigned.includes(n) || eveAssigned.includes(n) || nightAssigned.includes(n)) return false;
+        return true;
+      }).sort((a,b)=> (rankEve(a)<rankEve(b)?-1:1));
+      if(cands.length){
+        const p = cands[0];
+        eveAssigned.push(p);
+        stats[p].total++; stats[p].eveMonth++;
+        stats[p].lastShiftByDate[dateStr]='Eve';
+      }
+    }
+
+    // 日勤（09:00-17:00）※ 前日準夜の翌日NG
+    for(let k=0;k<reqDay;k++){
+      const cands = staff.filter(n=>{
+        if(isReqOff(n)) return false;
+        if(dayAssigned.includes(n) || eveAssigned.includes(n) || nightAssigned.includes(n)) return false;
+        if(hadEvePrev(n)) return false; // 準夜→翌日の日勤NG
+        return true;
+      }).sort((a,b)=> (rankDay(a)<rankDay(b)?-1:1));
+      if(cands.length){
+        const p = cands[0];
+        dayAssigned.push(p);
+        stats[p].total++;
+        stats[p].lastShiftByDate[dateStr]='Day';
+      }
+    }
+
+    schedule.push({ date:dateStr, dow:dowStr(d), day:dayAssigned, eve:eveAssigned, night:nightAssigned,
+                    needDay:reqDay, needEve:reqEve, needNight:reqNight });
+  }
+  return { schedule };
+}
+
+/* ========= 出力ユーティリティ ========= */
+function download(filename, blob){
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 250);
+}
+
+function toCSVWide(schedule){
+  let maxDay=0, maxEve=0, maxNight=0;
+  schedule.forEach(r=>{ maxDay=Math.max(maxDay,r.day.length); maxEve=Math.max(maxEve,r.eve.length); maxNight=Math.max(maxNight,r.night.length); });
+  const headers=['date','dow','need_day','need_eve','need_night'];
+  for(let i=1;i<=maxDay;i++) headers.push(`day_staff_${i}`);
+  for(let i=1;i<=maxEve;i++) headers.push(`eve_staff_${i}`);
+  for(let i=1;i<=maxNight;i++) headers.push(`night_staff_${i}`);
+  const rows=[headers.join(',')];
+  schedule.forEach(r=>{
+    const row=[r.date,r.dow,r.needDay,r.needEve,r.needNight];
+    for(let i=0;i<maxDay;i++) row.push(r.day[i]||'');
+    for(let i=0;i<maxEve;i++) row.push(r.eve[i]||'');
+    for(let i=0;i<maxNight;i++) row.push(r.night[i]||'');
+    rows.push(row.map(v=> String(v).replaceAll('"','""')).map(v=> /[,\n"]/.test(v)?`"${v}"`:v).join(','));
+  });
+  const bom=new Uint8Array([0xEF,0xBB,0xBF]);
+  return new Blob([bom, rows.join('\n')], {type:'text/csv;charset=utf-8;'});
+}
+
+function buildICS(schedule, opts={}){
+  const { mode='all', staffName=null } = opts;
+  const tz='Asia/Tokyo';
+  const now=new Date();
+  const dtstamp=now.toISOString().replace(/[-:]/g,'').replace(/\..+/,'Z');
+  const EOL='\r\n';
+  const pad2=n=> String(n).padStart(2,'0');
+  function dtLocal(dateStr, hhmm){
+    const [Y,M,D]=dateStr.split('-').map(Number);
+    const [hh,mm]=hhmm.split(':').map(Number);
+    return `${Y}${pad2(M)}${pad2(D)}T${pad2(hh)}${pad2(mm)}00`;
+  }
+  function plusOneDay(dateStr){ const d=new Date(dateStr+'T00:00:00'); d.setDate(d.getDate()+1); return fmtDate(d); }
+
+  const lines=[];
+  lines.push('BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//ShiftCrafter//Monthly3Shift//JP','CALSCALE:GREGORIAN');
+
+  schedule.forEach(r=>{
+    const date=r.date;
+    const evs=[];
+    // Day 09:00-17:00
+    r.day.forEach(name=>{
+      if(mode==='staff' && name!==staffName) return;
+      evs.push({ summary:`日勤：${name}`, start:dtLocal(date,'09:00'), end:dtLocal(date,'17:00'), uid:`${date}-day-${encodeURIComponent(name)}` });
+    });
+    // Evening 16:30-翌00:30
+    r.eve.forEach(name=>{
+      if(mode==='staff' && name!==staffName) return;
+      const next=plusOneDay(date);
+      evs.push({ summary:`準夜：${name}`, start:dtLocal(date,'16:30'), end:dtLocal(next,'00:30'), uid:`${date}-eve-${encodeURIComponent(name)}` });
+    });
+    // Night 00:30-09:00（同日）
+    r.night.forEach(name=>{
+      if(mode==='staff' && name!==staffName) return;
+      evs.push({ summary:`深夜：${name}`, start:dtLocal(date,'00:30'), end:dtLocal(date,'09:00'), uid:`${date}-night-${encodeURIComponent(name)}` });
+    });
+
+    evs.forEach(ev=>{
+      lines.push('BEGIN:VEVENT', `UID:${ev.uid}@shiftcrafter`, `DTSTAMP:${dtstamp}`,
+        `DTSTART;TZID=${tz}:${ev.start}`, `DTEND;TZID=${tz}:${ev.end}`, `SUMMARY:${ev.summary}`, 'END:VEVENT');
+    });
+  });
+
+  lines.push('END:VCALENDAR');
+  return new Blob([lines.join(EOL)], {type:'text/calendar;charset=utf-8;'});
+}
+
+function renderTable(schedule){
+  if(!schedule.length){ document.getElementById('tableWrap').textContent='未作成'; return; }
+  let maxDay=0,maxEve=0,maxNight=0;
+  schedule.forEach(r=>{ maxDay=Math.max(maxDay,r.day.length); maxEve=Math.max(maxEve,r.eve.length); maxNight=Math.max(maxNight,r.night.length); });
+  let html='<table><thead><tr>'+
+    '<th>date</th><th>dow</th><th>need_day</th><th>need_eve</th><th>need_night</th>';
+  for(let i=1;i<=maxDay;i++) html+=`<th>day_staff_${i}</th>`;
+  for(let i=1;i<=maxEve;i++) html+=`<th>eve_staff_${i}</th>`;
+  for(let i=1;i<=maxNight;i++) html+=`<th>night_staff_${i}</th>`;
+  html+='</tr></thead><tbody>';
+  schedule.forEach(r=>{
+    html+='<tr>'+
+      `<td>${r.date}</td><td>${r.dow}</td><td>${r.needDay}</td><td>${r.needEve}</td><td>${r.needNight}</td>`;
+    for(let i=0;i<maxDay;i++) html+=`<td>${r.day[i]||''}</td>`;
+    for(let i=0;i<maxEve;i++) html+=`<td>${r.eve[i]||''}</td>`;
+    for(let i=0;i<maxNight;i++) html+=`<td>${r.night[i]||''}</td>`;
+    html+='</tr>';
+  });
+  html+='</tbody></table>';
+  document.getElementById('tableWrap').innerHTML=html;
+}
+
+function renderSummary(schedule, staff){
+  const agg=Object.fromEntries(staff.map(s=>[s,{ total:0, day:0, eve:0, night:0 }]));
+  let consecNight=0, dayAfterEve=0;
+  for(let i=0;i<schedule.length;i++){
+    const curr=schedule[i], prev=schedule[i-1]||null;
+    curr.day.forEach(n=>{ agg[n].total++; agg[n].day++; });
+    curr.eve.forEach(n=>{ agg[n].total++; agg[n].eve++; });
+    curr.night.forEach(n=>{ agg[n].total++; agg[n].night++; });
+    if(prev){
+      const prevNight=new Set(prev.night);
+      const prevEve=new Set(prev.eve);
+      curr.night.forEach(n=>{ if(prevNight.has(n)) consecNight++; });
+      curr.day.forEach(n=>{ if(prevEve.has(n)) dayAfterEve++; });
+    }
+  }
+  const rows=[['staff','total','day','eve','night']];
+  Object.entries(agg).forEach(([k,v])=> rows.push([k,v.total,v.day,v.eve,v.night]));
+  const text=rows.map(r=>r.join('\t')).join('\n');
+  const tail = `\n注意: 連続深夜(2連以上)=${consecNight} / 準夜→翌日の日勤=${dayAfterEve}`;
+  document.getElementById('summary').textContent=text+tail;
+}
+
+/* ========= 検証CSV ========= */
+function buildValidationCSV(schedule, staff, requests, weeklyNightCap, monthlyNightCap){
+  const rows=[[
+    'staff','total','day','eve','night',
+    'consec_night_2plus','day_after_evening_violation',
+    'requested_off_days','satisfied_off_days','off_fulfillment_pct',
+    'weekly_night_cap','weekly_night_cap_violations','monthly_night_cap','monthly_night_cap_violation',
+    'required_slots_filled_pct'
+  ]];
+
+  // 必要枠充足率
+  let req=0, filled=0;
+  schedule.forEach(r=>{
+    req += (r.needDay||0)+(r.needEve||0)+(r.needNight||0);
+    filled += (r.day?.length||0)+(r.eve?.length||0)+(r.night?.length||0);
+  });
+  const filledPct = req ? Math.round(1000*filled/req)/10 : 100.0;
+
+  // per staff集計
+  const isoWeek=(ds)=>{
+    const dt=new Date(ds+'T00:00:00');
+    const date=new Date(Date.UTC(dt.getFullYear(),dt.getMonth(),dt.getDate()));
+    const dayNum=(date.getUTCDay()+6)%7; date.setUTCDate(date.getUTCDate()-dayNum+3);
+    const firstThu=new Date(Date.UTC(date.getUTCFullYear(),0,4));
+    const week=1+Math.round(((date-firstThu)/86400000 -3 + ((firstThu.getUTCDay()+6)%7))/7);
+    return `${date.getUTCFullYear()}-W${String(week).padStart(2,'0')}`;
+  };
+
+  const per=Object.fromEntries(staff.map(s=>[s,{
+    total:0, day:0, eve:0, night:0,
+    consecNight:0, dayAfterEve:0,
+    reqDays:0, offSat:0,
+    nightByWeek:{}, nightMonth:0
+  }]));
+
+  for(let i=0;i<schedule.length;i++){
+    const curr=schedule[i], prev=schedule[i-1]||null;
+    const wk=isoWeek(curr.date);
+    const reqSet=requests[curr.date]||new Set();
+
+    curr.day.forEach(n=>{ per[n].total++; per[n].day++; });
+    curr.eve.forEach(n=>{ per[n].total++; per[n].eve++; });
+    curr.night.forEach(n=>{ per[n].total++; per[n].night++; per[n].nightMonth++; per[n].nightByWeek[wk]=(per[n].nightByWeek[wk]||0)+1; });
+
+    if(prev){
+      const prevNight=new Set(prev.night);
+      const prevEve=new Set(prev.eve);
+      curr.night.forEach(n=>{ if(prevNight.has(n)) per[n].consecNight++; });
+      curr.day.forEach(n=>{ if(prevEve.has(n)) per[n].dayAfterEve++; });
+    }
+
+    staff.forEach(n=>{
+      if(reqSet.has(n)){
+        per[n].reqDays++;
+        const assigned = curr.day.includes(n) || curr.eve.includes(n) || curr.night.includes(n);
+        if(!assigned) per[n].offSat++;
+      }
+    });
+  }
+
+  staff.forEach(n=>{
+    const p=per[n];
+    const offPct = p.reqDays ? Math.round(1000*p.offSat/p.reqDays)/10 : 100.0;
+    let wkViol=0;
+    if(weeklyNightCap!=='' && weeklyNightCap!=null){
+      const cap=Number(weeklyNightCap)||0;
+      Object.values(p.nightByWeek).forEach(v=>{ if(v>cap) wkViol++; });
+    }
+    const mCap=(monthlyNightCap===''||monthlyNightCap==null)?null:Number(monthlyNightCap)||0;
+    const mViol=(mCap!=null)?(p.nightMonth>mCap?1:0):0;
+
+    rows.push([
+      n,p.total,p.day,p.eve,p.night,
+      p.consecNight,p.dayAfterEve,
+      p.reqDays,p.offSat,offPct,
+      (weeklyNightCap===''?'-':weeklyNightCap), wkViol,
+      (mCap==null?'-':mCap), mViol,
+      filledPct
+    ]);
+  });
+
+  const bom=new Uint8Array([0xEF,0xBB,0xBF]);
+  const csv=rows.map(r=> r.map(v=> String(v).replaceAll('"','""'))
+                         .map(v=> /[",\n]/.test(v)?`"${v}"`:v).join(','))
+                .join('\n');
+  return new Blob([bom,csv],{type:'text/csv;charset=utf-8;'});
+}
+
+/* ========= イベント ========= */
+const elMonth=document.getElementById('month');
+const elNeedDay=document.getElementById('needDay');
+const elNeedEve=document.getElementById('needEve');
+const elNeedNight=document.getElementById('needNight');
+const elWCap=document.getElementById('weeklyNightCap');
+const elMCap=document.getElementById('monthlyNightCap');
+const elBtnGen=document.getElementById('btnGen');
+const elBtnCsv=document.getElementById('btnCsv');
+const elBtnIcsAll=document.getElementById('btnIcsAll');
+const elBtnValidate=document.getElementById('btnValidate');
+const elMsg=document.getElementById('msg');
+
+let lastSchedule=null;
+
+elBtnGen.addEventListener('click', ()=>{
+  const monthStart=parseMonthStr(elMonth.value);
+  const staff=getStaff();
+  const requests=getRequests();
+  const needDay=Number(elNeedDay.value||0);
+  const needEve=Number(elNeedEve.value||0);
+  const needNight=Number(elNeedNight.value||0);
+  const weeklyNightCap=elWCap.value===''? '': Number(elWCap.value||0);
+  const monthlyNightCap=elMCap.value===''? '': Number(elMCap.value||0);
+
+  if(!monthStart){ elMsg.innerHTML='<span class="error">対象月を入力してください</span>'; return; }
+  if(staff.length===0){ elMsg.innerHTML='<span class="error">職員リストが空です</span>'; return; }
+  if((needDay+needEve+needNight)===0){ elMsg.innerHTML='<span class="warn">必要人数が全て0です。結果は空割当になります</span>'; }
+
+  const { schedule } = assignMonthly3({ monthStart, needDay, needEve, needNight, weeklyNightCap, monthlyNightCap, staff, requests });
+  lastSchedule=schedule;
+
+  renderTable(schedule);
+  renderSummary(schedule, staff);
+
+  elBtnCsv.disabled=false;
+  elBtnIcsAll.disabled=false;
+  elBtnValidate.disabled=false;
+
+  elMsg.innerHTML='<span class="ok">作成完了。CSV/ICS/検証CSVのダウンロードが可能です</span>';
+});
+
+elBtnCsv.addEventListener('click', ()=>{
+  if(!lastSchedule) return;
+  download('schedule_monthly_3shift.csv', toCSVWide(lastSchedule));
+});
+
+elBtnIcsAll.addEventListener('click', ()=>{
+  if(!lastSchedule) return;
+  download('shift_monthly_3shift_all.ics', buildICS(lastSchedule, {mode:'all'}));
+});
+
+elBtnValidate.addEventListener('click', ()=>{
+  if(!lastSchedule) return;
+  const staff=getStaff(), req=getRequests();
+  download('validation_summary_3shift.csv',
+    buildValidationCSV(lastSchedule, staff, req, elWCap.value, elMCap.value));
+});
+
+// 既定：今月を初期表示
+(function init(){
+  const now=new Date();
+  const ym=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  elMonth.value=ym;
+})();
+</script>
+</body>
+</html>
